@@ -1,0 +1,940 @@
+---
+title: "Love = Success"
+subtitle: "Data Science 3 - Final Assignment"
+author: "Kata Süle"
+date: '21st May 2021'
+output: 
+    html_document:
+        code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+```{r}
+# Load packages -------------------------------------------------------------------
+
+library(data.table)
+library(tidyverse)
+library(rvest)
+library(httr)
+library(ggplot2)
+library(tidytext)
+library(scales)
+library(GGally)
+library(textdata)
+library(ggthemr)
+library(wordcloud)
+library(reshape2)
+library(topicmodels)
+library(kableExtra)
+library(cowplot)
+library(widyr)
+library(igraph)
+library(ggraph)
+library(forcats)
+library(viridis)
+
+# set theme for plots
+theme_set(theme_light() +
+            theme( panel.grid.minor.x = element_blank(), 
+                                 plot.title = element_text( size = 12, face = "bold", hjust = 0.5 ) ))
+```
+
+
+## Introduction
+
+Before I could speak English I was wondering a lot what all the songs on the radio must have been about. I had the idea that the lyrics were probably very diverse in terms of topics. Later when I was able to understand them I had to realize that the vast majority of hit songs was about love. This gave me the inspiration for this project in which I intend to prove that songs on top of charts are mostly about love and hence their vocabulary is overlapping to a great extent.
+
+## Data Collection
+
+The first step was to define what 'hit songs' were. I decided that I would use songs from [Billboard's](https://www.billboard.com/charts/year-end/2019/hot-100-songs) year-end Top 100 charts. These charts are available on the website starting from 2006 until 2020. To make the data collection process efficient I wrote a function with which I could scrape the rankings, the titles and the artists for a given year, plus save the year itself. Then I ran this function for all the available years and transformed the results stored in lists into a dataframe. The dataframe contained 1498 songs because for some years a few ranks were missing on the website.
+
+```{r, eval = FALSE}
+# Scrape Top 100 songs from Billboard.com ---------------------------------
+
+# creating the links for every page to be scraped
+links <- NULL 
+for ( i in 2006:2020 ){
+  link <- paste0( 'https://www.billboard.com/charts/year-end/', i, '/hot-100-songs')
+  links <- c(links, link)
+}
+
+# creating a function which scrapes the ranking of the song, the title and the artist
+# and saves these into a named list
+get_one_page <- function( url ) {
+  # create empty list to save the data into
+  tlist <- list()
+    
+  # read page
+  page <- read_html( url )
+  
+  # extract rankings of songs
+  ranking <- 
+    page %>% 
+    html_nodes('.ye-chart-item__rank')%>%
+    html_text()
+  
+  # remove line breaks before and after the numbers
+  ranking <- str_replace_all(ranking, "\n", "")
+  
+  # save the rankings into a named list
+  tlist[[ 'ranking' ]] <- ranking
+  
+  # extract titles of songs
+  title <- 
+    page %>% 
+    html_nodes('.ye-chart-item__title')%>%
+    html_text()
+  
+  # remove line breaks before and after the titles
+  title <- str_replace_all(title, "\n", "")
+  
+  # save the titles to the list
+  tlist[[ 'title' ]] <- title
+  
+  # extract names of artists
+  artist <- 
+    page %>% 
+    html_nodes('.ye-chart-item__artist')%>%
+    html_text()
+  
+  # remove line breaks before and after the titles
+  artist <- str_replace_all(artist, "\n", "")
+  
+  # save the titles to the list
+  tlist[[ 'artist' ]] <- artist
+  
+  # extract year from url
+  r <- regexec("[0-9]+", url)
+  year <- regmatches(url, r)[[1]]
+  
+  # save year to list
+  tlist[['year']] <- rep(year, length(artist))
+  
+  return( tlist )
+}
+
+# scraping the pages for every available year with the function
+content <- lapply( links, get_one_page )
+
+# writing all the scraped content into a data frame
+df <- rbindlist( content, fill = T )
+```
+
+Now that I had the titles and the artists the next step was to get the lyrics of the songs. For this I first had to clean the `artist` column because it contained the names of all the artists who appeared in each song. This would have made it difficult to search for lyrics on a website because the search terms would have been too precise. Therefore, I created a new variable where I only stored the name of the first artist who was mentioned in the `artist` column. This meant that I basically kept the leading artist for every song because they were ordered based on their contribution to the song. I split the `artist` column along terms such as 'featuring', '&', ',' and 'with'. Then I realized that some of the names had stars in them so I removed these as well. Later on I used this new `artist` column as the artists of the songs.
+
+```{r, eval = FALSE}
+# Scrape the lyrics of songs ----------------------------------------------
+
+# split artist and create new column with the first artist's name
+# initialize empty list
+artist_clean <- NULL
+
+for (i in 1:nrow(df)){
+  if (str_detect(df$artist[i], 'Featuring')){
+    first_artist <- strsplit(df$artist[i], ' Featuring')[[1]][1]
+    if (str_detect(first_artist, '&')){
+      first_artist <- strsplit(first_artist, ' &')[[1]][1]
+      artist_clean <- c(artist_clean, first_artist)
+    } else {
+      artist_clean <- c(artist_clean, first_artist)
+    }
+  } else if (str_detect(df$artist[i], ',')){
+    first_artist <- strsplit(df$artist[i], ',')[[1]][1]
+    artist_clean <- c(artist_clean, first_artist)
+  } else if (str_detect(df$artist[i], '&')){
+    first_artist <- strsplit(df$artist[i], ' &')[[1]][1]
+    artist_clean <- c(artist_clean, first_artist)
+  } else if (str_detect(df$artist[i], 'With')){
+    first_artist <- strsplit(df$artist[i], ' With')[[1]][1]
+    artist_clean <- c(artist_clean, first_artist)
+  } else {
+    first_artist <- df$artist[i]
+    artist_clean <- c(artist_clean, first_artist)
+  }
+  
+}
+
+# remove *-s from artists names
+for (i in 1: length(artist_clean)){
+  if (str_detect(artist_clean[i], '\\*')){
+    clean <- str_replace_all(artist_clean[i], '\\*', ' ')
+    artist_clean[i] <- clean
+  } else {
+    next
+  }
+}
+
+# assign clean names to df
+df$artist_first <- artist_clean
+
+# change e at the end of Beyonce to é
+df$artist_first <- ifelse(df$artist_first == 'Beyonce', 'Beyoncé', df$artist_first)
+```
+
+Having cleaned the artist column I could scrape the urls that lead to the lyrics for each song. To do this I manipulated the url of the search page of [AZLyrics](https://www.azlyrics.com/) so that the search terms included the name of the artist and the title of the song. Then from the resulting page I could extract the url to the lyrics from the first search result. I performed this process for all the songs and added the urls to the dataframe.
+
+```{r, eval = FALSE}
+# create function to scrape url for one song
+get_one_lyrics_url <- function(i){
+  
+  # construct search term
+  search_term <- paste(tolower(df$artist_first[i]), tolower(df$title[i]), sep = '+')
+  
+  # construct search url
+  search_url <- paste0('https://search.azlyrics.com/search.php?q=', search_term)
+  
+  # scrape search page
+  search_page <- tryCatch( 
+    {
+      read_html(search_url)
+    },
+    error=function(cond) 
+    {
+      message(paste("URL caused an error:", search_url))
+      message("Here's the original error message:")
+      message(cond)
+      return(NA)
+    },
+    finally={
+      message(paste("Scraped URL:", search_url))
+    }
+  )
+  
+  # sleep to avoid getting blocked
+  Sys.sleep(sample(1:5, 1))
+  
+  # extract url to lyrics page
+  lyrics_url <- tryCatch(
+    {
+      search_page %>%
+      html_node('.visitedlyr') %>% 
+      html_node('a') %>%
+      html_attr('href')
+    },
+    error=function(cond) 
+    {
+      message(paste("URL caused an error:", search_url))
+      message("Here's the original error message:")
+      message(cond)
+      return(NA)
+    }
+  )
+  
+  return(lyrics_url)
+  
+}
+
+# run the function
+lyrics_url_sum <- lapply(1:1498, get_one_lyrics_url)
+
+# unlist the list of lists
+lyrics_url_sum <- unlist(lyrics_url_sum)
+
+# save lyrics urls to df
+df$lyrics_url <- lyrics_url_sum
+```
+
+Then I wrote another function with which I could scrape the lyrics page by using the urls retrieved in the previous section. After this I extracted the lyrics from the scraped html. I ran this function for all the songs and assigned the lyrics back to the dataframe.
+
+```{r, eval = FALSE}
+# create function to scrape lyrics for one song
+get_one_lyrics <- function(i){
+  
+  # read lyrics page
+  lyrics_page <- tryCatch( 
+    {
+      read_html(df$lyrics_url[i])
+    },
+    error=function(cond) 
+    {
+      message(paste("URL caused an error:", df$lyrics_url[i]))
+      message("Here's the original error message:")
+      message(cond)
+      return(NA)
+    },
+    finally={
+      message(paste("Scraped URL:", df$lyrics_url[i]))
+    }
+  )
+  
+  # sleep to avoid getting blocked
+  Sys.sleep(sample(1:5, 1))
+  
+  # extract lyrics
+  lyrics_text <- tryCatch(
+    {
+    lyrics_page %>%
+    html_nodes('div') %>%
+    html_text()
+    },
+    error=function(cond) 
+    {
+      message(paste("URL caused an error:", df$lyrics_url[i]))
+      message("Here's the original error message:")
+      message(cond)
+      return(NA)
+    },
+    finally={
+      message(paste("Scraped lyrics for song number:", i))
+    }
+  )
+  
+  one_lyrics <- lyrics_text[21]
+  
+  return(one_lyrics)
+}
+
+# run the function
+lyrics_sum <- lapply(1:1498, get_one_lyrics)
+
+# flatten list
+lyrics_sum <- unlist(lyrics_sum)
+
+# save lyrics to df
+df$lyrics <- lyrics_sum
+```
+
+Here I have to add a note that because the structure of the html was not always the same or because I did not manage to clean the name of the artist well enough I could not scrape the lyrics for some of the songs. Therefore, I dropped these from the dataframe which meant that I ended up with 1173 songs.
+
+```{r}
+# import df
+df <- read_csv('C:/CEU/Spring_Term/Data_Science_3/Assignment/df_with_lyrics_full.csv')
+
+# check the number of observations where lyrics is missing
+n_missing <- df %>% filter(is.na(lyrics)) %>% nrow()
+
+# filter observations where lyrics are missing
+df <- df %>% filter(is.na(lyrics) == FALSE)
+```
+
+## Preparation for Text Analysis
+
+To be able to perform text analysis on the lyrics they had to be cleaned. First, I removed the linebreaks and unnecessary white spaces. Then I also removed text between square brackets because some of the lyrics contained information such as '[Verse 1]' which would not have been useful for the sake of analysis.
+
+```{r}
+# Clean lyrics ------------------------------------------------------------
+
+# clean lyrics from linebreaks and extra white spaces
+df$lyrics <- unlist(lapply(df$lyrics, function(x){
+              gsub('\\s+',' ', x)
+              }))
+
+# clean lyrics from extra information in square brackets such as [Verse 1]
+df$lyrics <- unlist(lapply(df$lyrics, function(x){
+              gsub("\\[[^\\)]+\\]", "", x)
+              }))
+
+```
+
+Once the text was cleaned I dropped songs that were duplicated because some of them made it to the Top 100 for more than one year. Then I selected the columns that I wanted to use later which were: `year`, `artist`, `title` and `lyrics`.
+
+```{r}
+# filter duplicates
+df <- df[!duplicated(df$lyrics_url),]
+
+# select columns
+df <- df %>% select(title, artist_first, year, lyrics)
+```
+
+## Frequent Words
+
+Now that I had the cleaned text I could start with the analysis. Throughout the project I used the `tidytext` approach. First I tokenized the lyrics which meant that in the resulting data frame every word of every song formed an observation. Then I filtered the stop words so that I would be left with more meaningful words. 
+
+```{r}
+# tokenize songs
+df_tokens <- df %>% unnest_tokens(word, lyrics)
+
+# import stopwords
+data(stop_words)
+
+# filter stopwords from the tokens
+df_tokens <- df_tokens %>%
+  anti_join(stop_words)
+```
+
+In the plot below I visualized those words that appeared most frequently in the lyrics throughout the 15 years. Some of these already show that love is a recurring topic in these songs. In addition, we can also see that short words that are very specific to songs such as 'la' and 'na' are also present. It is interesting that these terms appear more frequently than actual words.
+
+```{r, fig.align = 'center'}
+# plot 10 most common words
+df_tokens %>%
+  count(word, sort = TRUE) %>%
+  head(10) %>% 
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col(aes(fill = n), show.legend = F) +
+  xlab(NULL) +
+  coord_flip() +
+  ylab('Frequency') +
+  ggtitle('Top 10 Most Frequent Words in Billboard Top 100 Songs') +
+  scale_fill_viridis()
+```
+
+Since the plot above could only show the top 10 most frequent words, I decided to visualize the most frequent words on a word cloud as well. This can be seen below, showing the top 100 most frequent words. Here we can also see words related to love and sexuality, however swearwords are prominent as well.
+
+```{r, fig.align = 'center'}
+# wordcloud with most common words
+df_tokens %>%
+  anti_join(stop_words) %>%
+  count(word) %>%
+  with(wordcloud(word, n, max.words = 100))
+```
+
+I was curious to break down most frequent words to an artist level. For this, I first looked into which artists had the most songs in the dataset so that calculating word frequency would be more meaningful. The plot below shows the top 10 artists who appeared the most times on the Billboard chart with different songs.
+
+```{r, fig.align = 'center'}
+# plot top 10 most popular artists with different songs
+df %>% 
+  count(artist_first, sort = TRUE) %>% 
+  head(10) %>% 
+  mutate(artist_first = reorder(artist_first, n)) %>%
+  ggplot(aes(n, artist_first)) +
+  geom_col(aes(fill = n), show.legend = F) +
+  scale_fill_viridis(discrete = F) +
+  labs(y = NULL, x = 'Number of Songs', title = 'Top 10 Most Popular Artists')
+```
+
+Based on the plot above I chose two artists whose music is relatively different from each other to see to what extent their most frequently used words overlap. This can be seen in the plot below. We can see that there is some overlap indeed between the two plots. Drake's language seems to be more explicit than Taylor Swift's, though. What is also interesting is that the word counts for Drake are higher in general which is probably because he makes rap music which has more text than pop music.
+
+```{r, fig.align='center'}
+# compare most frequent words for Taylor Swift and Drake
+# plot top 10 words for Taylor Swift
+p1 <- df_tokens %>% 
+  filter(artist_first %in% c('Taylor Swift')) %>% 
+  count(word, sort = T) %>% 
+  head(10) %>% 
+  mutate(word = reorder(word, n)) %>% 
+  ggplot(aes(n, word)) +
+  geom_col(show.legend = FALSE, aes(fill = n)) +
+  scale_fill_viridis(discrete = F) +
+  labs(y = NULL, x = 'Frequency', title = 'Top 10 Words for Taylor Swift')
+
+# plot top 10 words for Drake
+p2 <- df_tokens %>% 
+  filter(artist_first %in% c('Drake')) %>% 
+  count(word, sort = T) %>% 
+  head(10) %>% 
+  mutate(word = reorder(word, n)) %>% 
+  ggplot(aes(n, word)) +
+  geom_col(show.legend = FALSE, aes(fill = n)) +
+  scale_fill_viridis(discrete = F) +
+  labs(y = NULL, x = 'Frequency', title = 'Top 10 Words for Drake')
+
+cowplot::plot_grid(p1,p2)
+```
+
+I was also wondering whether the words used in lyrics do not change much over the years. To investigate this I grouped the tokens by year and calculated their relative frequencies. In the plot below I compare all the years to 2006. We can see that the words are spread along the 45 degree line which means that the words appear with the same frequency in the given year and 2006. We can also see some highlighted words whose frequency is high and 'baby' appears for all the years.
+
+```{r, fig.align = 'center'}
+# compare frequency of words to 2006
+frequency <- df_tokens %>% 
+  mutate(word = str_extract(word, "[a-z']+")) %>%
+  count(year, word) %>%
+  group_by(year) %>%
+  mutate(proportion = n / sum(n)) %>% 
+  select(-n) %>% 
+  spread(year, proportion) %>% 
+  pivot_longer(names_to = "year", values_to = "proportion", cols = as.character(setdiff(unique(df_tokens$year), c(2006))))
+
+# plot frequent words by year
+ggplot(frequency, aes(x = proportion, y = `2006`, 
+                      color = abs(`2006` - proportion))) +
+  geom_abline(color = "gray", lty = 2) +
+  geom_jitter(alpha = 0.1, size = 2.5, width = 0.3, height = 0.3) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient(limits = c(0, 0.001), 
+                       low = "darkslategray4", high = "gray75") +
+  facet_wrap(~year, ncol = 3) +
+  theme(legend.position="none") +
+  labs(y = "2006", x = NULL, title = 'Comparison of Frequently Used Words Across Years')
+```
+
+## Sentiment Analysis
+
+Moving forward with the analysis I investigated the sentiments of the songs. To be able to do this I first downloaded three 'general' sentiment lexicons: NRC, Bing and AFINN. These lexicons assign sentiments to words in different ways. The NRC lexicon has several sentiment categories such as joy or anger, the Bing lexicon only has positive and negative categories while the AFINN one assigns positive numbers to positive and negative numbers to negative words. First I joined the tokens with the NRC lexicon to see which sentiment categories they got assigned to. This is shown in the table below. We can see that the positive and negative categories have the highest number of tokens. This could still be aligned with my hypothesis because love songs can be either happy or sad.
+
+```{r}
+# download lexicons
+nrc <- get_sentiments("nrc")
+bing <- get_sentiments("bing")
+afinn <- get_sentiments("afinn")
+
+# join tokens with sentiment
+df_sentiment_nrc <- df_tokens %>% inner_join(nrc)
+
+# check the number of words in different sentiment categories
+df_sentiment_nrc %>% 
+  group_by(sentiment) %>% 
+  summarise(num_words = n()) %>% 
+  arrange(-num_words) %>% 
+  kbl(caption = "Number of Words by Sentiment Category in NRC",
+      col.names = c('Sentiment', 'Number of Words')) %>%
+  kable_minimal()
+```
+
+Since the three lexicons have different definitions for positive and negative sentiments I thought it would be interesting to compare them. To do this I first had to calculate the sentiments of songs. This was achieved by subtracting the number of negative words in a song from the number of positive ones. For the AFINN and NRC lexicons this required an extra step because positive and negative categories had to be established or filtered. For the AFINN lexicon I assigned 'positive' to words with a score higher than zero and 'negative' to those with a score lower than zero. As for the NRC lexicon I simply just filtered for the 'positive' and 'negative' categories. The plot below shows the comparison of how the different lexicons assigned sentiment to songs. We can see that the Bing and the NRC lexicons are more similar to each other then to the AFINN lexicon. The latter has very high peaks towards positivity. For further sentiment analysis I decided to use the Bing lexicon because that proved to be the most balanced one.
+
+```{r, fig.align = 'center'}
+# compare the three dictionaries
+# calculate sentiment with afinn
+afinn <- df_tokens %>% 
+  inner_join(afinn) %>%
+  mutate(sentiment = ifelse(value < 0, "negative", 
+                            ifelse(value == 0, "neutral", "positive")))%>%
+  count(index = title, sentiment)%>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive - negative) %>% 
+  mutate(method = "AFINN")
+
+# calculate sentiment with nrc and bing
+bing_and_nrc <- bind_rows(df_tokens %>% 
+                            inner_join(bing) %>%
+                            mutate(method = "Bing et al."),
+                          df_tokens %>% 
+                            inner_join(nrc %>% 
+                                         filter(sentiment %in% c("positive", 
+                                                                 "negative"))) %>%
+                            mutate(method = "NRC")) %>%
+  count(method, index = title, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive - negative)
+
+# bind the two df-s and plot sentiment across songs
+bind_rows(afinn, 
+          bing_and_nrc) %>%
+  ggplot(aes(index, sentiment, fill = method)) +
+  scale_fill_viridis_d() +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~method, ncol = 1, scales = "free_y") +
+  labs(x = NULL, y = 'Sentiment', title = 'Comparison of Sentiment Lexicons') +
+  theme(axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+```
+
+Using the same technique as before - subtracting the number of negative words from the number of positive words for each song - I calculated the sentiments of songs for the top 4 artists. In the plot below we can see that Chris Brown's, Drake's and Maroon 5's songs are more neutral on average than Rihanna's. What we can also conclude is that overall there are more songs that have a negative sentiment than a positive one.
+
+```{r, fig.align = 'center'}
+# compare sentiments across top 4 artists
+# get names of top 4 artists
+top4 <- df %>% 
+  count(artist_first, sort = T) %>% 
+  head(4)
+
+# calculate sentiment for their songs
+top4_sent <- df_tokens %>% 
+              filter(artist_first %in% top4$artist_first) %>% 
+              inner_join(bing) %>%
+              count(artist_first, index = title, sentiment) %>%
+              pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% 
+              mutate(sentiment = positive - negative)
+
+# plot sentiment
+ggplot(top4_sent, aes(index, sentiment, fill = artist_first)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_viridis_d() +
+  facet_wrap(~artist_first, ncol = 2, scales = "free_x") +
+  labs(x = NULL, y = 'Sentiment', title = 'Song Sentiments of Top 4 Artists') +
+  theme(axis.text.x = element_blank(),
+        axis.ticks = element_blank())
+```
+
+It is worth looking into the most common positive and negative words because this can help us understand why most songs were classified as rather negative. The plot below shows the most common positive and negative words. Based on it I would argue that some of the negative words could also be positive ones depending on the context.
+
+```{r, fig.align = 'center'}
+# most common positive and negative words
+bing_word_counts <- df_tokens %>%
+  inner_join(bing) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup()
+
+# plot
+bing_word_counts %>%
+  group_by(sentiment) %>%
+  slice_max(n, n = 10) %>% 
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_viridis_d() +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(x = NULL,
+       y = NULL, title = 'Most Frequent Positive and Negative Words')
+```
+
+Finally, just like with the top 10 most frequent words I decided to plot the most frequent positive and negative words on a word cloud as well. The advantage of this is that more words are displayed than on the chart above.
+
+```{r, fig.align = 'center'}
+# create wordcloud for positive and negative words
+df_tokens %>%
+  inner_join(bing) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>%
+  comparison.cloud(colors = c("gray20", "gray80"),
+                   max.words = 100)
+```
+
+## Topic Modelling
+
+In this section I used LDA to see whether the words or the lyrics themselves can be grouped. My assumption was that since the lyrics are probably very similar it was going to be difficult to assign words to groups that are significantly different from each other.
+
+First I grouped the tokens by song and calculated their frequencies so that I could create a document-term matrix which is necessary for LDA. In this matrix every song has a row and every token has a column. Then after experimenting with different topic numbers, I decided to use only two. The top five words of each topic can be seen in the plot below. The top words were those that had the highest possibility scores for belonging to one of the topics. Based on the plot we can conclude that even these two topics are not so different from each other. My explanation is that topic one has the words from more explicit songs while topic two has the words of softer ones.
+
+```{r, fig.align = 'center'}
+# Topic modelling ---------------------------------------------------------
+
+# count words by song
+df_tokens_counts <- df_tokens %>% 
+  count(title, word, sort = T) %>% 
+  ungroup()
+
+# create document-term matrix
+df_dtm <- df_tokens_counts %>%
+  cast_dtm(title, word, n)
+
+# do LDA
+songs_lda <- LDA(df_dtm, k = 2, control = list(seed = 1234))
+
+# check topics
+songs_topics <- tidy(songs_lda, matrix = "beta")
+
+# get top terms for each topic
+top_terms <- songs_topics %>%
+  group_by(topic) %>%
+  top_n(5, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+# visualize top words by topic
+top_terms %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_viridis_d() +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() +
+  labs(x = NULL, y = 'Probability', title = 'Top 5 Words by Topic')
+```
+
+I also looked at those words that had the highest differences between their probability scores. Here again, those words that had a higher score for topic one seem nicer than those that had a higher score for topic two.
+
+```{r, fig.align = 'center'}
+# calculate differences in beta between topics
+beta_wide <- songs_topics %>%
+  mutate(topic = paste0("topic", topic)) %>%
+  pivot_wider(names_from = topic, values_from = beta) %>% 
+  filter(topic1 > .001 | topic2 > .001) %>%
+  mutate(log_ratio = log2(topic2 / topic1))
+
+# create plot
+beta_wide %>% 
+  top_n(20, abs(log_ratio)) %>%
+  mutate(term = reorder(term, log_ratio)) %>%
+  ggplot(aes(term, log_ratio, fill = log_ratio < 0)) +
+  geom_col(show.legend = F) +
+  scale_fill_viridis_d() +
+  coord_flip() +
+  labs(y = "Log2 Ratio of Beta in Topic 2/Topic 1", x = NULL, title = 'Words with the Greatest Differences Between Topics')
+```
+
+I was also curious to see which songs belong to which topic. The plot below shows the top 5 songs for each topic. We can see that the probabilities are much higher here than for the individual words, they are all one.
+
+```{r, fig.align = 'center'}
+# check topics for songs
+songs_gamma <- tidy(songs_lda, matrix = "gamma")
+
+# get top topics for each song
+top_songs <- songs_gamma %>%
+  group_by(topic) %>%
+  top_n(5, gamma) %>%
+  ungroup() %>%
+  arrange(topic, -gamma)
+
+# visualize top songs by topic
+top_songs %>%
+  mutate(document = reorder(document, gamma)) %>%
+  ggplot(aes(document, gamma, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_viridis_d() +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() +
+  labs(x = NULL, y = 'Probability', title = 'Top 5 Songs by Topic')
+```
+
+As a next step I wanted to find out whether LDA is able to create groups that are representative of artists. For this I chose four artists: Rihanna, Lil Wayne, Ariana Grande and Chris Brown. Then I grouped the tokens by artist and song and calculated frequencies. Then I transformed this into a document-term matrix where the rows had songs by a certain artist and the columns had the terms. Then I did LDA for four topics because I had songs by four artists. For the boxplot below I used the possibility scores of songs. We can see that the algorithm was not really capable of sorting the songs by the four artists into four separate groups. This is probably because the words in the songs are so similar that it is difficult to differentiate between them. To me the most surprising overlap is between Lil Wayne and Ariana Grande because I assumed that their lyrics are rather different from each other.
+
+```{r, fig.align = 'center'}
+# group songs by artist and count words
+item_counts <- df_tokens %>% 
+  filter(artist_first %in% c('Rihanna', 'Lil Wayne', 'Ariana Grande', 'Chris Brown')) %>% 
+  unite(item, artist_first, title) %>% 
+  select(item, word) %>% 
+  count(item, word, sort = TRUE) %>%
+  ungroup()
+
+# create document-term matrix
+items_dtm <- item_counts %>%
+  cast_dtm(item, word, n)
+
+# do LDA
+items_lda <- LDA(items_dtm, k = 4, control = list(seed = 1234))
+
+# check the topics
+items_gamma <- tidy(items_lda, matrix = "gamma")
+
+# separate artist from song title
+items_gamma <- items_gamma %>%
+  separate(document, c("artist", "title"), sep = "_", convert = TRUE)
+
+# plot topic probability across artists
+items_gamma %>%
+  mutate(artist = reorder(artist, gamma * topic)) %>%
+  ggplot(aes(factor(topic), gamma)) +
+  geom_boxplot() +
+  facet_wrap(~ artist) +
+  labs(x = "Topic", y = expression(gamma), title = 'Testing LDA for Artists')
+```
+
+Then I did a little experiment. I assigned every artist to a topic by first assigning the topic with the highest possibility to each of their songs and then choosing the topic which was assigned the most times. Even at this step I saw that some artists were assigned to more than one topic. Then I also assigned every word of every song by all the artists to a topic. This way it was possible to compare whether the artist assigned to a given topic was also the real artist of a song. The plot below visualizes this comparison. We can see that except for Lil Wayne and Rihanna every other pair had incorrectly assigned words. I believe this also proves that the words in the lyrics are very similar therefore it is difficult to assign them to one artist.
+
+```{r, fig.align = 'center'}
+# get topic most associated with each artist
+artist_classifications <- items_gamma %>%
+  group_by(artist, title) %>%
+  slice_max(gamma) %>%
+  ungroup()
+
+# assign artists to topics
+artist_topics <- artist_classifications %>%
+  count(artist, topic) %>%
+  group_by(artist) %>%
+  slice_max(n, n = 1) %>% 
+  ungroup() %>%
+  transmute(consensus = artist, topic)
+
+# assign topics to words
+assignments <- augment(items_lda, data = items_dtm)
+
+# separate artist and title and join 'consensus' artist
+assignments <- assignments %>%
+  separate(document, c("artist", "title"), 
+           sep = "_", convert = TRUE) %>%
+  inner_join(artist_topics, by = c(".topic" = "topic"))
+
+# create plot
+assignments %>%
+  count(artist, consensus, wt = count) %>%
+  mutate(across(c(artist, consensus), ~str_wrap(., 20))) %>%
+  group_by(artist) %>%
+  mutate(percent = n / sum(n)) %>%
+  ggplot(aes(consensus, artist, fill = percent)) +
+  geom_tile() +
+  scale_fill_viridis(label = percent_format()) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        panel.grid = element_blank()) +
+  labs(x = "Lyric words were assigned to",
+       y = "Lyric words came from",
+       fill = "% of assignments", title = "Comparison of Artists' Choices of Words")
+```
+
+I was curious about the incorrectly assigned words so I created the table below. Based on the analysis so far these words are pretty general for Billboard top songs so it was no surprise that the algorithm had a hard time differentiating them.
+
+```{r}
+# check incorrectly assigned words
+wrong_words <- assignments %>%
+  filter(artist != consensus)
+
+# order it by word count
+wrong_words %>%
+  count(artist, consensus, term, wt = count) %>%
+  ungroup() %>%
+  arrange(desc(n)) %>% 
+  head(10) %>% 
+  kbl(caption = "Top 10 Incorrectly Assigned Words",
+      col.names = c('Artist', 'Consensus', 'Word', 'Count')) %>%
+  kable_minimal()
+```
+
+## TF-IDF
+
+In this next section I calculated the TF-IDF score for words. The higher the TF-IDF score is the more unique a word is to a certain document. My assumption was that these scores were going to be relatively low since most songs use the same set of words.
+
+To get the TF-IDF scores I first tokenized the lyrics again, grouped the tokens by artist and then calculated their frequency. Then I also calculated the total number of words by artist. To get the TF-IDF scores I used the `bind_tf_idf` function. The table below shows the words with the highest TF-IDF scores by artist. It was interesting to me that the highest TF-IDF scores belonged to artists whose names I did not know so well. This would mean that more well-known artists use a very similar vocabulary for most of their songs.
+
+```{r}
+##### TF-IDF for artist
+# count tokens by artist
+song_words <- df %>%
+  unnest_tokens(word, lyrics) %>%
+  count(artist_first, word, sort = TRUE)
+
+# count total frequency by artist
+total_words <- song_words %>% 
+  group_by(artist_first) %>% 
+  summarize(total = sum(n))
+
+# join the df-s together
+song_words <- left_join(song_words, total_words)
+
+# get tf-idf
+song_tf_idf <- song_words %>%
+  bind_tf_idf(word, artist_first, n)
+
+# look at words with high tf-idf scores
+song_tf_idf %>%
+  select(-total) %>%
+  arrange(desc(tf_idf)) %>% 
+  head(10) %>% 
+  select(artist_first, word, tf_idf) %>% 
+  kbl(caption = "Top 10 Words with Highest TF-IDF Scores",
+      col.names = c('Artist', 'Word', 'TF-IDF')) %>%
+  kable_minimal()
+```
+
+In the plot below I aimed to show that two of the top 5 artists indeed have pretty low TF-IDF scores compared to the highest ones. This means that their lyrics from song to song do not really change.
+
+```{r, fig.align='center'}
+# plot 
+song_tf_idf %>%
+  group_by(artist_first) %>%
+  filter(artist_first %in% c('Drake', 'Maroon 5')) %>% 
+  slice_max(tf_idf, n = 15) %>%
+  ungroup() %>%
+  ggplot(aes(tf_idf, fct_reorder(word, tf_idf), fill = artist_first)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_viridis_d() +
+  facet_wrap(~artist_first, ncol = 2, scales = "free") +
+  labs(x = 'TF-IDF Score', title = 'Words with Highest TF-IDF Scores', y = NULL)
+```
+
+## Word Co-occurrences and Correlations
+
+In this section I wanted to find out which are the words that frequently occur together. To do this I used the tokenized lyrics and counted the number of times two words appear together. The graph below shows those pairs that appear more than 80 times.
+
+```{r, fig.align='center'}
+# Word co-occurrences and correlations ------------------------------------
+
+# create df with artist + title as IDs
+df_cooc <- df_tokens %>% 
+  mutate(id = paste0(artist_first, title))
+
+# get words that occur together frequently
+content_word_pairs <- df_cooc %>% 
+  pairwise_count(word, id, sort = TRUE, upper = FALSE)
+
+# plot them on a network
+set.seed(1234)
+content_word_pairs %>%
+  filter(n >= 80) %>%
+  graph_from_data_frame() %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "cyan4") +
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE, 
+                 point.padding = unit(0.2, "lines")) +
+  ggtitle('Most Frequent Co-occuring Words') +
+  theme_void() +
+  theme(plot.title = element_text( size = 12, face = "bold", hjust = 0.5 ) )
+```
+
+## Bigram Analysis
+
+In this last section I used bigram analysis to find two word collocations in the text. First I tokenized the lyrics into bigrams whose frequencies I counted by year. Then I filtered stop words from them and calculated their TF-IDF scores. This is shown in the table below. It is interesting that all of them belong to 2019.
+
+```{r}
+# do bigrams
+billboard_bigrams <- df %>%
+  unnest_tokens(bigram, lyrics, token = "ngrams", n = 2)
+
+# group bigrams by year
+billboard_bigrams <- billboard_bigrams %>%
+  count(year, bigram, sort = TRUE) %>%
+  ungroup() %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+# add custom stopwords
+my_stopwords <- tibble(word = c(as.character(1:16), 
+                                "la", "na", "ha", "yeah", 'doh', 'du', 'ooh', 'whoa',
+                                'wee', 'ay', 'doo', 'aah', 'hey', 'ah', 'eh', 'ey',
+                                'uh', 'huh'))
+
+# check top bigrams by year
+bigrams_filtered <- billboard_bigrams %>% 
+  filter(!(word1 %in% my_stopwords$word) & !(word2 %in% my_stopwords$word)) %>% 
+  filter(!(word1 %in% stop_words$word) & !(word2 %in% stop_words$word))
+
+# unite bigrams
+bigrams_united <- bigrams_filtered %>%
+  unite(bigram, word1, word2, sep = " ")
+
+# calculate tf-idf for bigrams
+bigram_tf_idf <- bigrams_united %>%
+  count(year, bigram) %>%
+  bind_tf_idf(bigram, year, n) %>%
+  arrange(desc(tf_idf)) %>% 
+  head(10)
+
+# print table
+bigram_tf_idf %>% 
+  select(year, bigram, tf_idf) %>% 
+  kbl(caption = "Top 10 Bigrams with Highest TF-IDF Scores",
+      col.names = c('Year', 'Bigram', 'TF-IDF')) %>%
+  kable_minimal()
+```
+
+Bigrams can also be a great tool for sentiment analysis because they enable us to find words preceded by a negating word. This way we can identify words which contributed to the sentiment score of songs in the 'wrong' direction. To do this I filtered for bigrams starting with 'not' and then assigned the AFINN sentiment scores to the second words. The plot below shows the top 20 words which contributed to sentiment in the wrong direction. We can see that there are more positive words which should have been perceived as negative than negative words which should have been perceived as positive ones.
+
+```{r, fig.align='center'}
+# bigrams for sentiment analysis
+not_words <- billboard_bigrams %>%
+  filter(word1 == "not") %>%
+  inner_join(get_sentiments("afinn"), by = c(word2 = "word")) %>%
+  count(word2, value, sort = TRUE)
+
+# plot
+not_words %>%
+  mutate(contribution = n * value) %>%
+  arrange(desc(abs(contribution))) %>%
+  head(20) %>%
+  mutate(word2 = reorder(word2, contribution)) %>%
+  ggplot(aes(n * value, word2, fill = n * value > 0)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_viridis_d() +
+  labs(x = "Sentiment Value * Number of Occurrences",
+       y = "Words Preceded by \"not\"",
+       title = 'Top Words Contributing to the "Wrong" Sentiment')
+```
+
+It is also possible to visualize bigrams on a network. There are some clusters in the plot below which shows that there are words which appear in bigrams more frequently than others.
+
+```{r, fig.align='center'}
+# make graph from bigram
+bigram_graph <- billboard_bigrams %>%
+  select(-year) %>% 
+  filter(n > 50) %>%
+  graph_from_data_frame()
+
+set.seed(2017)
+a <- grid::arrow(type = "closed", length = unit(.15, "inches"))
+
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n), show.legend = FALSE,
+                 arrow = a, end_cap = circle(.07, 'inches')) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+## Conclusion
+
+At the end of this project I had to come to the conclusion that my hypotheses were right. Billboard's top songs are indeed mostly about love and their vocabularies are not very diverse. These were shown through identifying common words, topic modelling and TF-IDF scores. One question arises at this point: how come that the audience does not find these songs monotonous and still listens to them all the time? I believe the answer is that it is the power of music and not necessarily the lyrics that make a song popular. However, unfortunately that cannot be analysed with the tidytext approach.
